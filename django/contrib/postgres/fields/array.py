@@ -169,7 +169,7 @@ class ArrayField(CheckFieldDefaultMixin, Field):
             else:
                 obj = AttributeSetter(base_field.attname, val)
                 values.append(base_field.value_to_string(obj))
-        return json.dumps(values)
+        return json.dumps(values, ensure_ascii=False)
 
     def get_transform(self, name):
         transform = super().get_transform(name)
@@ -233,6 +233,12 @@ class ArrayField(CheckFieldDefaultMixin, Field):
                 **kwargs,
             }
         )
+
+    def slice_expression(self, expression, start, length):
+        # If length is not provided, don't specify an end to slice to the end
+        # of the array.
+        end = None if length is None else start + length - 1
+        return SliceTransform(start, end, expression)
 
 
 class ArrayRHSMixin:
@@ -351,9 +357,11 @@ class SliceTransform(Transform):
 
     def as_sql(self, compiler, connection):
         lhs, params = compiler.compile(self.lhs)
-        if not lhs.endswith("]"):
-            lhs = "(%s)" % lhs
-        return "%s[%%s:%%s]" % lhs, (*params, self.start, self.end)
+        # self.start is set to 1 if slice start is not provided.
+        if self.end is None:
+            return f"({lhs})[%s:]", (*params, self.start)
+        else:
+            return f"({lhs})[%s:%s]", (*params, self.start, self.end)
 
 
 class SliceTransformFactory:

@@ -25,6 +25,7 @@ from django.db.models import (
     Subquery,
     Sum,
     TimeField,
+    Transform,
     Value,
     Variance,
     When,
@@ -1290,7 +1291,7 @@ class AggregateTestCase(TestCase):
 
             def as_sql(self, compiler, connection):
                 copy = self.copy()
-                copy.set_source_expressions(copy.get_source_expressions()[0:1])
+                copy.set_source_expressions(copy.get_source_expressions()[0:1] + [None])
                 return super(MyMax, copy).as_sql(compiler, connection)
 
         with self.assertRaisesMessage(TypeError, "Complex aggregates require an alias"):
@@ -1725,6 +1726,48 @@ class AggregateTestCase(TestCase):
             ],
             lambda a: (a.name, a.contact_count),
             ordered=False,
+        )
+
+    def test_order_by_aggregate_transform(self):
+        class Mod100(Mod, Transform):
+            def __init__(self, expr):
+                super().__init__(expr, 100)
+
+        sum_field = IntegerField()
+        sum_field.register_lookup(Mod100, "mod100")
+        publisher_pages = (
+            Book.objects.values("publisher")
+            .annotate(sum_pages=Sum("pages", output_field=sum_field))
+            .order_by("sum_pages__mod100")
+        )
+        self.assertQuerySetEqual(
+            publisher_pages,
+            [
+                {"publisher": self.p2.id, "sum_pages": 528},
+                {"publisher": self.p4.id, "sum_pages": 946},
+                {"publisher": self.p1.id, "sum_pages": 747},
+                {"publisher": self.p3.id, "sum_pages": 1482},
+            ],
+        )
+
+    def test_order_by_aggregate_default_alias(self):
+        publisher_books = (
+            Publisher.objects.values("book")
+            .annotate(Count("book"))
+            .order_by("book__count", "book__id")
+            .values_list("book", flat=True)
+        )
+        self.assertQuerySetEqual(
+            publisher_books,
+            [
+                None,
+                self.b1.id,
+                self.b2.id,
+                self.b3.id,
+                self.b4.id,
+                self.b5.id,
+                self.b6.id,
+            ],
         )
 
     def test_empty_result_optimization(self):
@@ -2309,3 +2352,31 @@ class AggregateAnnotationPruningTests(TestCase):
             aggregate,
             {"sum_avg_publisher_pages": 1100.0, "books_count": 2},
         )
+
+    def test_aggregate_reference_lookup_rhs(self):
+        aggregates = Author.objects.annotate(
+            max_book_author=Max("book__authors"),
+        ).aggregate(count=Count("id", filter=Q(id=F("max_book_author"))))
+        self.assertEqual(aggregates, {"count": 1})
+
+    def test_aggregate_reference_lookup_rhs_iter(self):
+        aggregates = Author.objects.annotate(
+            max_book_author=Max("book__authors"),
+        ).aggregate(count=Count("id", filter=Q(id__in=[F("max_book_author"), 0])))
+        self.assertEqual(aggregates, {"count": 1})
+
+    @skipUnlessDBFeature("supports_select_union")
+    def test_aggregate_combined_queries(self):
+        # Combined queries could have members in their values select mask while
+        # others have them in their annotation mask which makes annotation
+        # pruning complex to implement hence why it's not implemented.
+        qs = Author.objects.values(
+            "age",
+            other=Value(0),
+        ).union(
+            Book.objects.values(
+                age=Value(0),
+                other=Value(0),
+            )
+        )
+        self.assertEqual(qs.count(), 3)

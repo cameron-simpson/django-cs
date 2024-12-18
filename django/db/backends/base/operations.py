@@ -8,7 +8,6 @@ import sqlparse
 
 from django.conf import settings
 from django.db import NotSupportedError, transaction
-from django.db.backends import utils
 from django.db.models.expressions import Col
 from django.utils import timezone
 from django.utils.deprecation import RemovedInDjango60Warning
@@ -228,6 +227,7 @@ class BaseDatabaseOperations:
                 "DatabaseOperations.lookup_cast() instead."
             ),
             RemovedInDjango60Warning,
+            stacklevel=2,
         )
         return "%s"
 
@@ -275,6 +275,11 @@ class BaseDatabaseOperations:
             )
             if sql
         )
+
+    def bulk_insert_sql(self, fields, placeholder_rows):
+        placeholder_rows_sql = (", ".join(row) for row in placeholder_rows)
+        values_sql = ", ".join([f"({sql})" for sql in placeholder_rows_sql])
+        return f"VALUES {values_sql}"
 
     def last_executed_query(self, cursor, sql, params):
         """
@@ -562,10 +567,6 @@ class BaseDatabaseOperations:
         """
         if value is None:
             return None
-        # Expression values are adapted by the database.
-        if hasattr(value, "resolve_expression"):
-            return value
-
         return str(value)
 
     def adapt_timefield_value(self, value):
@@ -575,10 +576,6 @@ class BaseDatabaseOperations:
         """
         if value is None:
             return None
-        # Expression values are adapted by the database.
-        if hasattr(value, "resolve_expression"):
-            return value
-
         if timezone.is_aware(value):
             raise ValueError("Django does not support timezone-aware times.")
         return str(value)
@@ -588,7 +585,7 @@ class BaseDatabaseOperations:
         Transform a decimal.Decimal value to an object compatible with what is
         expected by the backend driver for decimal (numeric) columns.
         """
-        return utils.format_number(value, max_digits, decimal_places)
+        return value
 
     def adapt_ipaddressfield_value(self, value):
         """
